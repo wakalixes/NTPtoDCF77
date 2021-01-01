@@ -1014,8 +1014,8 @@ void setNowToTime(struct tm * t) {
   now.day.digit.lo = (uint8_t) formatString[1];
   now.month.digit.hi = (uint8_t) formatString[3];
   now.month.digit.lo = (uint8_t) formatString[4];
-  now.year.digit.hi = (uint8_t) formatString[6];
-  now.year.digit.lo = (uint8_t) formatString[7];
+  now.year.digit.hi = (uint8_t) formatString[8];
+  now.year.digit.lo = (uint8_t) formatString[9];
   now.hour.digit.hi = (uint8_t) formatString[11];
   now.hour.digit.lo = (uint8_t) formatString[12];
   now.minute.digit.hi = (uint8_t) formatString[14];
