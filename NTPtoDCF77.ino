@@ -15,28 +15,29 @@
 
 #include <WiFi.h>
 #include "time.h"
+#include <Timezone_Generic.h>
 
 #define MAX_SRV_CLIENTS  2
 
-const char* CMD_HIGH        =           "on";
-const char* CMD_LOW         =          "off";
-const char* CMD_SEP         =            " ";
-const char* CMD_START       =            "#";
-const char* CMD_GETSTATUS   =       "status";
-const char* CMD_RESET       =        "reset";
-const char* CMD_RESETWIFI   =    "resetwifi";
-const char* CMD_SYNCTIME    =         "sync";
+const char* CMD_HIGH        =            "on";
+const char* CMD_LOW         =           "off";
+const char* CMD_SEP         =             " ";
+const char* CMD_START       =             "#";
+const char* CMD_GETSTATUS   =        "status";
+const char* CMD_RESET       =         "reset";
+const char* CMD_RESETWIFI   =     "resetwifi";
+const char* CMD_SYNCTIME    =          "sync";
 
-const char* WIFI_SSID       =    "YOUR_SSID";
-const char* WIFI_PASSWORD   =    "YOUR_PASS";
+const char* WIFI_SSID       =    "NotMyThing";
+const char* WIFI_PASSWORD   =     "WebBybvid";
 
-const int   DCF_PIN         =              2; // LED0 and open-collector output is on GPIO2
-const int   PERIOD_DCF_MS   =            100; // DCF period in milliseconds
-const int   PERIOD_SYNCED_S =              2; // recheck if synced period
-const int   PERIOD_NTP_S    =          10*60; // NTP synchronization period in seconds
-const char* NTP_SERVER      = "pool.ntp.org"; // NTP server
-const long  NTP_GMT_S       =          60*60; // GMT offset in seconds
-const int   NTP_DAYLIGHT_S  =          60*60; // daylight offset in seconds
+const int   DCF_PIN         =               2; // LED0 and open-collector output is on GPIO2
+const int   PERIOD_DCF_MS   =             100; // DCF period in milliseconds
+const int   PERIOD_SYNCED_S =               2; // recheck if synced period
+const int   PERIOD_NTP_S    =           10*60; // NTP synchronization period in seconds
+const char* NTP_SERVER      =  "pool.ntp.org"; // NTP server
+const long  NTP_GMT_S       =               0; // offset to get UTC
+const int   NTP_DAYLIGHT_S  =               0; // no daylight saving time, it will be handled by Timezone
 
 struct {
   boolean stringComplete = false;
@@ -53,6 +54,10 @@ char formatString[32];
 
 WiFiServer server(23);   // telnet server
 WiFiClient serverClients[MAX_SRV_CLIENTS];
+
+TimeChangeRule CEST = {"CEST", Last, Sun, Mar, 2, 120};
+TimeChangeRule CET = {"CET ", Last, Sun, Oct, 3, 60};
+Timezone CE(CEST, CET);
 
 template <class T> void consolePrint(T output);
 template <class T> void consolePrint(T output, int type);
@@ -138,7 +143,7 @@ namespace DCF77 {
     BCD::bcd_t hour;     // 0..23
     BCD::bcd_t minute;   // 0..59
     uint8_t second;      // 0..60
-    bool uses_summertime           : 1;  // false -> wintertime, true, summertime
+    bool uses_summertime           : 1;  // false -> wintertime, true -> summertime
     bool uses_backup_antenna       : 1;  // typically false
     bool timezone_change_scheduled : 1;
     bool leap_second_scheduled     : 1;
@@ -166,30 +171,30 @@ namespace DCF77_Encoder {
   // It only *** encodes *** whatever time is set
   // It does never attempt to verify the data
   
-  void reset(DCF77::time_data_t &now);
+  void reset(DCF77::time_data_t &dcf_now);
   
-  uint8_t weekday(const DCF77::time_data_t &now);         // sunday == 0
-  BCD::bcd_t bcd_weekday(const DCF77::time_data_t &now);  // sunday == 7
+  uint8_t weekday(const DCF77::time_data_t &dcf_now);         // sunday == 0
+  BCD::bcd_t bcd_weekday(const DCF77::time_data_t &dcf_now);  // sunday == 7
   
-  DCF77::tick_t get_current_signal(const DCF77::time_data_t &now);
+  DCF77::tick_t get_current_signal(const DCF77::time_data_t &dcf_now);
   
   // This will advance the second. It will consider the control
   // bits while doing so. It will NOT try to properly set the
   // control bits. If this is desired "autoset" must be called in
   // advance.
-  void advance_second(DCF77::time_data_t &now);
+  void advance_second(DCF77::time_data_t &dcf_now);
   
   // The same but for the minute
-  void advance_minute(DCF77::time_data_t &now);
+  void advance_minute(DCF77::time_data_t &dcf_now);
   
   // This will set the weekday by evaluating the date.
-  void autoset_weekday(DCF77::time_data_t &now);
+  void autoset_weekday(DCF77::time_data_t &dcf_now);
   
   // This will set the control bits, as a side effect it sets the weekday
   // It will generate the control bits exactly like DCF77 would.
   // Look at the leap second and summer / wintertime transistions
   // to understand the subtle implications.
-  void autoset_control_bits(DCF77::time_data_t &now);
+  void autoset_control_bits(DCF77::time_data_t &dcf_now);
   
   void debug(const DCF77::time_data_t &clock);
   void debug(const DCF77::time_data_t &clock, const uint16_t cycles);
@@ -397,52 +402,52 @@ namespace Arithmetic_Tools {
 namespace DCF77_Encoder {
   using namespace DCF77;
   
-  inline uint8_t days_per_month(const DCF77::time_data_t &now) __attribute__((always_inline));
-  uint8_t days_per_month(const DCF77::time_data_t &now) {
-    switch (now.month.val) {
+  inline uint8_t days_per_month(const DCF77::time_data_t &dcf_now) __attribute__((always_inline));
+  uint8_t days_per_month(const DCF77::time_data_t &dcf_now) {
+    switch (dcf_now.month.val) {
       case 0x02:
         // valid till 31.12.2399
         // notice year mod 4 == year & 0x03
-        return 28 + ((now.year.val != 0) && ((bcd_to_int(now.year) & 0x03) == 0) ? 1 : 0);
+        return 28 + ((dcf_now.year.val != 0) && ((bcd_to_int(dcf_now.year) & 0x03) == 0) ? 1 : 0);
       case 0x01: case 0x03: case 0x05: case 0x07: case 0x08: case 0x10: case 0x12: return 31;
       case 0x04: case 0x06: case 0x09: case 0x11:                  return 30;
       default: return 0;
     }
   }
   
-  void reset(DCF77::time_data_t &now) {
-    now.second    = 0;
-    now.minute.val  = 0x00;
-    now.hour.val  = 0x00;
-    now.day.val   = 0x01;
-    now.month.val   = 0x01;
-    now.year.val  = 0x00;
-    now.weekday.val = 0x01;
-    now.uses_summertime           = false;
-    now.uses_backup_antenna       = false;
-    now.timezone_change_scheduled = false;
-    now.leap_second_scheduled     = false;
+  void reset(DCF77::time_data_t &dcf_now) {
+    dcf_now.second    = 0;
+    dcf_now.minute.val  = 0x00;
+    dcf_now.hour.val  = 0x00;
+    dcf_now.day.val   = 0x01;
+    dcf_now.month.val   = 0x01;
+    dcf_now.year.val  = 0x00;
+    dcf_now.weekday.val = 0x01;
+    dcf_now.uses_summertime           = false;
+    dcf_now.uses_backup_antenna       = false;
+    dcf_now.timezone_change_scheduled = false;
+    dcf_now.leap_second_scheduled     = false;
   
-    now.undefined_minute_output                    = false;
-    now.undefined_uses_summertime_output           = false;
-    now.undefined_uses_backup_antenna_output       = false;
-    now.undefined_timezone_change_scheduled_output = false;
+    dcf_now.undefined_minute_output                    = false;
+    dcf_now.undefined_uses_summertime_output           = false;
+    dcf_now.undefined_uses_backup_antenna_output       = false;
+    dcf_now.undefined_timezone_change_scheduled_output = false;
   }
   
-  uint8_t weekday(const DCF77::time_data_t &now) {  // attention: sunday will be ==0 instead of 7
+  uint8_t weekday(const DCF77::time_data_t &dcf_now) {  // attention: sunday will be ==0 instead of 7
     using namespace BCD;
   
-    if (now.day.val <= 0x31 && now.month.val <= 0x12 && now.year.val <= 0x99) {
+    if (dcf_now.day.val <= 0x31 && dcf_now.month.val <= 0x12 && dcf_now.year.val <= 0x99) {
       // This will compute the weekday for each year in 2001-2099.
       // If you really plan to use my code beyond 2099 take care of this
       // on your own. My assumption is that it is even unclear if DCF77
       // will still exist then.
   
       // http://de.wikipedia.org/wiki/Gau%C3%9Fsche_Wochentagsformel
-      const uint8_t  d = bcd_to_int(now.day);
-      const uint16_t m = now.month.val <= 0x02 ? now.month.val + 10 :
-                         bcd_to_int(now.month) - 2;
-      const uint8_t  y = bcd_to_int(now.year) - (now.month.val <= 0x02);
+      const uint8_t  d = bcd_to_int(dcf_now.day);
+      const uint16_t m = dcf_now.month.val <= 0x02 ? dcf_now.month.val + 10 :
+                         bcd_to_int(dcf_now.month) - 2;
+      const uint8_t  y = bcd_to_int(dcf_now.year) - (dcf_now.month.val <= 0x02);
       // m must be of type uint16_t otherwise this will compute crap
       uint8_t day_mod_7 = d + (26 * m - 2) / 10 + y + y / 4;
       // We exploit 8 mod 7 = 1
@@ -457,10 +462,10 @@ namespace DCF77_Encoder {
     }
   }
   
-  BCD::bcd_t bcd_weekday(const DCF77::time_data_t &now) {
+  BCD::bcd_t bcd_weekday(const DCF77::time_data_t &dcf_now) {
     BCD::bcd_t today;
   
-    today.val = weekday(now);
+    today.val = weekday(dcf_now);
     if (today.val == 0) {
       today.val = 7;
     }
@@ -468,192 +473,192 @@ namespace DCF77_Encoder {
     return today;
   }
   
-  void autoset_weekday(DCF77::time_data_t &now) {
-    now.weekday = bcd_weekday(now);
+  void autoset_weekday(DCF77::time_data_t &dcf_now) {
+    dcf_now.weekday = bcd_weekday(dcf_now);
   }
   
-  void autoset_timezone(DCF77::time_data_t &now) {
+  void autoset_timezone(DCF77::time_data_t &dcf_now) {
     // timezone change may only happen at the last sunday of march / october
     // the last sunday is always somewhere in [25-31]
   
     // Wintertime --> Summertime happens at 01:00 UTC == 02:00 CET == 03:00 CEST,
     // Summertime --> Wintertime happens at 01:00 UTC == 02:00 CET == 03:00 CEST
   
-    if (now.month.val < 0x03) {
+    if (dcf_now.month.val < 0x03) {
       // January or February
-      now.uses_summertime = false;
-    } else if (now.month.val == 0x03) {
+      dcf_now.uses_summertime = false;
+    } else if (dcf_now.month.val == 0x03) {
       // March
-      if (now.day.val < 0x25) {
+      if (dcf_now.day.val < 0x25) {
         // Last Sunday of March must be 0x25-0x31
         // Thus still to early for summertime
-        now.uses_summertime = false;
-      } else if (uint8_t wd = weekday(now)) {
+        dcf_now.uses_summertime = false;
+      } else if (uint8_t wd = weekday(dcf_now)) {
         // wd != 0 --> not a Sunday
-        if (now.day.val - wd < 0x25) {
+        if (dcf_now.day.val - wd < 0x25) {
           // early March --> wintertime
-          now.uses_summertime = false;
+          dcf_now.uses_summertime = false;
         } else {
           // late march summertime
-          now.uses_summertime = true;
+          dcf_now.uses_summertime = true;
         }
       } else {
         // last sunday of march
         // decision depends on the current hour
-        now.uses_summertime = (now.hour.val > 2);
+        dcf_now.uses_summertime = (dcf_now.hour.val > 2);
       }
-    } else if (now.month.val < 0x10) {
+    } else if (dcf_now.month.val < 0x10) {
       // April - September
-      now.uses_summertime = true;
-    } else if (now.month.val == 0x10) {
+      dcf_now.uses_summertime = true;
+    } else if (dcf_now.month.val == 0x10) {
       // October
-      if (now.day.val < 0x25) {
+      if (dcf_now.day.val < 0x25) {
         // early October
-        now.uses_summertime = true;
-      } else if (uint8_t wd = weekday(now)) {
+        dcf_now.uses_summertime = true;
+      } else if (uint8_t wd = weekday(dcf_now)) {
         // wd != 0 --> not a Sunday
-        if (now.day.val - wd < 0x25) {
+        if (dcf_now.day.val - wd < 0x25) {
           // early October --> summertime
-          now.uses_summertime = true;
+          dcf_now.uses_summertime = true;
         } else {
           // late October --> wintertime
-          now.uses_summertime = false;
+          dcf_now.uses_summertime = false;
         }
       } else {  // last sunday of october
-        if (now.hour.val == 2) {
+        if (dcf_now.hour.val == 2) {
           // can not derive the flag from time data
           // this is the only time the flag is derived
           // from the flag vector
   
         } else {
           // decision depends on the current hour
-          now.uses_summertime = (now.hour.val < 2);
+          dcf_now.uses_summertime = (dcf_now.hour.val < 2);
         }
       }
     } else {
       // November and December
-      now.uses_summertime = false;
+      dcf_now.uses_summertime = false;
     }
   }
   
-  void autoset_timezone_change_scheduled(DCF77::time_data_t &now) {
+  void autoset_timezone_change_scheduled(DCF77::time_data_t &dcf_now) {
     // summer/wintertime change will always happen
     // at clearly defined hours
     // http://www.gesetze-im-internet.de/sozv/__2.html
   
     // in doubt have a look here: http://www.dcf77logs.de/
-    if (now.day.val < 0x25 || weekday(now) != 0) {
+    if (dcf_now.day.val < 0x25 || weekday(dcf_now) != 0) {
       // timezone change may only happen at the last sunday of march / october
       // the last sunday is always somewhere in [25-31]
   
       // notice that undefined (==0xff) day/weekday data will not cause any action
-      now.timezone_change_scheduled = false;
+      dcf_now.timezone_change_scheduled = false;
     } else {
-      if (now.month.val == 0x03) {
-        if (now.uses_summertime) {
-          now.timezone_change_scheduled = (now.hour.val == 0x03 && now.minute.val == 0x00); // wintertime to summertime, preparing first minute of summertime
+      if (dcf_now.month.val == 0x03) {
+        if (dcf_now.uses_summertime) {
+          dcf_now.timezone_change_scheduled = (dcf_now.hour.val == 0x03 && dcf_now.minute.val == 0x00); // wintertime to summertime, preparing first minute of summertime
         } else {
-          now.timezone_change_scheduled = (now.hour.val == 0x01 && now.minute.val != 0x00); // wintertime to summertime
+          dcf_now.timezone_change_scheduled = (dcf_now.hour.val == 0x01 && dcf_now.minute.val != 0x00); // wintertime to summertime
         }
-      } else if (now.month.val == 0x10) {
-        if (now.uses_summertime) {
-          now.timezone_change_scheduled = (now.hour.val == 0x02 && now.minute.val != 0x00); // summertime to wintertime
+      } else if (dcf_now.month.val == 0x10) {
+        if (dcf_now.uses_summertime) {
+          dcf_now.timezone_change_scheduled = (dcf_now.hour.val == 0x02 && dcf_now.minute.val != 0x00); // summertime to wintertime
         } else {
-          now.timezone_change_scheduled = (now.hour.val == 0x02 && now.minute.val == 0x00); // summertime to wintertime, preparing first minute of wintertime
+          dcf_now.timezone_change_scheduled = (dcf_now.hour.val == 0x02 && dcf_now.minute.val == 0x00); // summertime to wintertime, preparing first minute of wintertime
         }
-      } else if (now.month.val <= 0x12) {
-        now.timezone_change_scheduled = false;
+      } else if (dcf_now.month.val <= 0x12) {
+        dcf_now.timezone_change_scheduled = false;
       }
     }
   }
   
-  void verify_leap_second_scheduled(DCF77::time_data_t &now) {
+  void verify_leap_second_scheduled(DCF77::time_data_t &dcf_now) {
     // If day or month are unknown we default to "no leap second" because this is alway a very good guess.
     // If we do not know for sure we are either acquiring a lock right now --> we will easily recover from a wrong guess
     // or we have very noisy data --> the leap second bit is probably noisy as well --> we should assume the most likely case
   
-    now.leap_second_scheduled &= (now.day.val == 0x01);
+    dcf_now.leap_second_scheduled &= (dcf_now.day.val == 0x01);
   
     // leap seconds will always happen at 00:00 UTC == 01:00 CET == 02:00 CEST
-    if (now.month.val == 0x01) {
-      now.leap_second_scheduled &= ((now.hour.val == 0x00 && now.minute.val != 0x00) ||
-                                    (now.hour.val == 0x01 && now.minute.val == 0x00));
-    } else if (now.month.val == 0x07 || now.month.val == 0x04 || now.month.val == 0x10) {
-      now.leap_second_scheduled &= ((now.hour.val == 0x01 && now.minute.val != 0x00) ||
-                                    (now.hour.val == 0x02 && now.minute.val == 0x00));
+    if (dcf_now.month.val == 0x01) {
+      dcf_now.leap_second_scheduled &= ((dcf_now.hour.val == 0x00 && dcf_now.minute.val != 0x00) ||
+                                        (dcf_now.hour.val == 0x01 && dcf_now.minute.val == 0x00));
+    } else if (dcf_now.month.val == 0x07 || dcf_now.month.val == 0x04 || dcf_now.month.val == 0x10) {
+      dcf_now.leap_second_scheduled &= ((dcf_now.hour.val == 0x01 && dcf_now.minute.val != 0x00) ||
+                                        (dcf_now.hour.val == 0x02 && dcf_now.minute.val == 0x00));
     } else {
-      now.leap_second_scheduled = false;
+      dcf_now.leap_second_scheduled = false;
     }
   }
   
-  void autoset_control_bits(DCF77::time_data_t &now) {
-    autoset_weekday(now);
-    autoset_timezone(now);
-    autoset_timezone_change_scheduled(now);
+  void autoset_control_bits(DCF77::time_data_t &dcf_now) {
+    autoset_weekday(dcf_now);
+    autoset_timezone(dcf_now);
+    autoset_timezone_change_scheduled(dcf_now);
     // we can not compute leap seconds, we can only verify if they might happen
-    verify_leap_second_scheduled(now);
+    verify_leap_second_scheduled(dcf_now);
   }
   
-  void advance_second(DCF77::time_data_t &now) {
+  void advance_second(DCF77::time_data_t &dcf_now) {
     // in case some value is out of range it will not be advanced
     // this is on purpose
-    if (now.second < 59) {
-      ++now.second;
-      if (now.second == 15) {
-        autoset_control_bits(now);
+    if (dcf_now.second < 59) {
+      ++dcf_now.second;
+      if (dcf_now.second == 15) {
+        autoset_control_bits(dcf_now);
       }
   
-    } else if (now.leap_second_scheduled && now.second == 59 && now.minute.val == 0x00) {
-      now.second = 60;
-      now.leap_second_scheduled = false;
-    } else if (now.second == 59 || now.second == 60) {
-      now.second = 0;
-      advance_minute(now);
+    } else if (dcf_now.leap_second_scheduled && dcf_now.second == 59 && dcf_now.minute.val == 0x00) {
+      dcf_now.second = 60;
+      dcf_now.leap_second_scheduled = false;
+    } else if (dcf_now.second == 59 || dcf_now.second == 60) {
+      dcf_now.second = 0;
+      advance_minute(dcf_now);
     }
   }
   
-  void advance_minute(DCF77::time_data_t &now) {
-    if (now.minute.val < 0x59) {
-      increment(now.minute);
-    } else if (now.minute.val == 0x59) {
-      now.minute.val = 0x00;
+  void advance_minute(DCF77::time_data_t &dcf_now) {
+    if (dcf_now.minute.val < 0x59) {
+      increment(dcf_now.minute);
+    } else if (dcf_now.minute.val == 0x59) {
+      dcf_now.minute.val = 0x00;
       // in doubt have a look here: http://www.dcf77logs.de/
-      if (now.timezone_change_scheduled && !now.uses_summertime && now.hour.val == 0x01) {
+      if (dcf_now.timezone_change_scheduled && !dcf_now.uses_summertime && dcf_now.hour.val == 0x01) {
         // Wintertime --> Summertime happens at 01:00 UTC == 02:00 CET == 03:00 CEST,
         // the clock must be advanced from 01:59 CET to 03:00 CEST
-        increment(now.hour);
-        increment(now.hour);
-        now.uses_summertime = true;
-      }  else if (now.timezone_change_scheduled && now.uses_summertime && now.hour.val == 0x02) {
+        increment(dcf_now.hour);
+        increment(dcf_now.hour);
+        dcf_now.uses_summertime = true;
+      }  else if (dcf_now.timezone_change_scheduled && dcf_now.uses_summertime && dcf_now.hour.val == 0x02) {
         // Summertime --> Wintertime happens at 01:00 UTC == 02:00 CET == 03:00,
         // the clock must be advanced from 02:59 CEST to 02:00 CET
-        now.uses_summertime = false;
+        dcf_now.uses_summertime = false;
       } else {
-        if (now.hour.val < 0x23) {
-          increment(now.hour);
-        } else if (now.hour.val == 0x23) {
-          now.hour.val = 0x00;
+        if (dcf_now.hour.val < 0x23) {
+          increment(dcf_now.hour);
+        } else if (dcf_now.hour.val == 0x23) {
+          dcf_now.hour.val = 0x00;
   
-          if (now.weekday.val < 0x07) {
-            increment(now.weekday);
-          } else if (now.weekday.val == 0x07) {
-            now.weekday.val = 0x01;
+          if (dcf_now.weekday.val < 0x07) {
+            increment(dcf_now.weekday);
+          } else if (dcf_now.weekday.val == 0x07) {
+            dcf_now.weekday.val = 0x01;
           }
   
-          if (bcd_to_int(now.day) < days_per_month(now)) {
-            increment(now.day);
-          } else if (bcd_to_int(now.day) == days_per_month(now)) {
-            now.day.val = 0x01;
+          if (bcd_to_int(dcf_now.day) < days_per_month(dcf_now)) {
+            increment(dcf_now.day);
+          } else if (bcd_to_int(dcf_now.day) == days_per_month(dcf_now)) {
+            dcf_now.day.val = 0x01;
   
-            if (now.month.val < 0x12) {
-              increment(now.month);
-            } else if (now.month.val == 0x12) {
-              now.month.val = 0x01;
+            if (dcf_now.month.val < 0x12) {
+              increment(dcf_now.month);
+            } else if (dcf_now.month.val == 0x12) {
+              dcf_now.month.val = 0x01;
   
-              if (now.year.val < 0x99) {
-                increment(now.year);
-              } else if (now.year.val == 0x99) {
-                now.year.val = 0x00;
+              if (dcf_now.year.val < 0x99) {
+                increment(dcf_now.year);
+              } else if (dcf_now.year.val == 0x99) {
+                dcf_now.year.val = 0x00;
               }
             }
           }
@@ -662,183 +667,183 @@ namespace DCF77_Encoder {
     }
   }
   
-  DCF77::tick_t get_current_signal(const DCF77::time_data_t &now) {
+  DCF77::tick_t get_current_signal(const DCF77::time_data_t &dcf_now) {
     using namespace Arithmetic_Tools;
   
-    if (now.second >= 1 && now.second <= 14) {
+    if (dcf_now.second >= 1 && dcf_now.second <= 14) {
       // weather data or other stuff we can not compute
       return undefined;
     }
   
     bool result;
-    switch (now.second) {
+    switch (dcf_now.second) {
       case 0:  // start of minute
         return short_tick;
   
       case 15:
-        if (now.undefined_uses_backup_antenna_output) { return undefined; }
-        result = now.uses_backup_antenna; break;
+        if (dcf_now.undefined_uses_backup_antenna_output) { return undefined; }
+        result = dcf_now.uses_backup_antenna; break;
   
       case 16:
-        if (now.undefined_timezone_change_scheduled_output) { return undefined; }
-        result = now.timezone_change_scheduled; break;
+        if (dcf_now.undefined_timezone_change_scheduled_output) { return undefined; }
+        result = dcf_now.timezone_change_scheduled; break;
   
       case 17:
-        if (now.undefined_uses_summertime_output) { return undefined; }
-        result = now.uses_summertime; break;
+        if (dcf_now.undefined_uses_summertime_output) { return undefined; }
+        result = dcf_now.uses_summertime; break;
   
       case 18:
-        if (now.undefined_uses_summertime_output) { return undefined; }
-        result = !now.uses_summertime; break;
+        if (dcf_now.undefined_uses_summertime_output) { return undefined; }
+        result = !dcf_now.uses_summertime; break;
   
       case 19:
-        result = now.leap_second_scheduled; break;
+        result = dcf_now.leap_second_scheduled; break;
   
       case 20:  // start of time information
         return long_tick;
   
       case 21:
-        if (now.undefined_minute_output || now.minute.val > 0x59) { return undefined; }
-        result = now.minute.digit.lo & 0x1; break;
+        if (dcf_now.undefined_minute_output || dcf_now.minute.val > 0x59) { return undefined; }
+        result = dcf_now.minute.digit.lo & 0x1; break;
       case 22:
-        if (now.undefined_minute_output || now.minute.val > 0x59) { return undefined; }
-        result = now.minute.digit.lo & 0x2; break;
+        if (dcf_now.undefined_minute_output || dcf_now.minute.val > 0x59) { return undefined; }
+        result = dcf_now.minute.digit.lo & 0x2; break;
       case 23:
-        if (now.undefined_minute_output || now.minute.val > 0x59) { return undefined; }
-        result = now.minute.digit.lo & 0x4; break;
+        if (dcf_now.undefined_minute_output || dcf_now.minute.val > 0x59) { return undefined; }
+        result = dcf_now.minute.digit.lo & 0x4; break;
       case 24:
-        if (now.undefined_minute_output || now.minute.val > 0x59) { return undefined; }
-        result = now.minute.digit.lo & 0x8; break;
+        if (dcf_now.undefined_minute_output || dcf_now.minute.val > 0x59) { return undefined; }
+        result = dcf_now.minute.digit.lo & 0x8; break;
   
       case 25:
-        if (now.undefined_minute_output || now.minute.val > 0x59) { return undefined; }
-        result = now.minute.digit.hi & 0x1; break;
+        if (dcf_now.undefined_minute_output || dcf_now.minute.val > 0x59) { return undefined; }
+        result = dcf_now.minute.digit.hi & 0x1; break;
       case 26:
-        if (now.undefined_minute_output || now.minute.val > 0x59) { return undefined; }
-        result = now.minute.digit.hi & 0x2; break;
+        if (dcf_now.undefined_minute_output || dcf_now.minute.val > 0x59) { return undefined; }
+        result = dcf_now.minute.digit.hi & 0x2; break;
       case 27:
-        if (now.undefined_minute_output || now.minute.val > 0x59) { return undefined; }
-        result = now.minute.digit.hi & 0x4; break;
+        if (dcf_now.undefined_minute_output || dcf_now.minute.val > 0x59) { return undefined; }
+        result = dcf_now.minute.digit.hi & 0x4; break;
   
       case 28:
-        if (now.undefined_minute_output || now.minute.val > 0x59) { return undefined; }
-        result = parity(now.minute.val); break;
+        if (dcf_now.undefined_minute_output || dcf_now.minute.val > 0x59) { return undefined; }
+        result = parity(dcf_now.minute.val); break;
   
   
       case 29:
-        if (now.hour.val > 0x23) { return undefined; }
-        result = now.hour.digit.lo & 0x1; break;
+        if (dcf_now.hour.val > 0x23) { return undefined; }
+        result = dcf_now.hour.digit.lo & 0x1; break;
       case 30:
-        if (now.hour.val > 0x23) { return undefined; }
-        result = now.hour.digit.lo & 0x2; break;
+        if (dcf_now.hour.val > 0x23) { return undefined; }
+        result = dcf_now.hour.digit.lo & 0x2; break;
       case 31:
-        if (now.hour.val > 0x23) { return undefined; }
-        result = now.hour.digit.lo & 0x4; break;
+        if (dcf_now.hour.val > 0x23) { return undefined; }
+        result = dcf_now.hour.digit.lo & 0x4; break;
       case 32:
-        if (now.hour.val > 0x23) { return undefined; }
-        result = now.hour.digit.lo & 0x8; break;
+        if (dcf_now.hour.val > 0x23) { return undefined; }
+        result = dcf_now.hour.digit.lo & 0x8; break;
   
       case 33:
-        if (now.hour.val > 0x23) { return undefined; }
-        result = now.hour.digit.hi & 0x1; break;
+        if (dcf_now.hour.val > 0x23) { return undefined; }
+        result = dcf_now.hour.digit.hi & 0x1; break;
       case 34:
-        if (now.hour.val > 0x23) { return undefined; }
-        result = now.hour.digit.hi & 0x2; break;
+        if (dcf_now.hour.val > 0x23) { return undefined; }
+        result = dcf_now.hour.digit.hi & 0x2; break;
   
       case 35:
-        if (now.hour.val > 0x23) { return undefined; }
-        result = parity(now.hour.val); break;
+        if (dcf_now.hour.val > 0x23) { return undefined; }
+        result = parity(dcf_now.hour.val); break;
   
       case 36:
-        if (now.day.val > 0x31) { return undefined; }
-        result = now.day.digit.lo & 0x1; break;
+        if (dcf_now.day.val > 0x31) { return undefined; }
+        result = dcf_now.day.digit.lo & 0x1; break;
       case 37:
-        if (now.day.val > 0x31) { return undefined; }
-        result = now.day.digit.lo & 0x2; break;
+        if (dcf_now.day.val > 0x31) { return undefined; }
+        result = dcf_now.day.digit.lo & 0x2; break;
       case 38:
-        if (now.day.val > 0x31) { return undefined; }
-        result = now.day.digit.lo & 0x4; break;
+        if (dcf_now.day.val > 0x31) { return undefined; }
+        result = dcf_now.day.digit.lo & 0x4; break;
       case 39:
-        if (now.day.val > 0x31) { return undefined; }
-        result = now.day.digit.lo & 0x8; break;
+        if (dcf_now.day.val > 0x31) { return undefined; }
+        result = dcf_now.day.digit.lo & 0x8; break;
   
       case 40:
-        if (now.day.val > 0x31) { return undefined; }
-        result = now.day.digit.hi & 0x1; break;
+        if (dcf_now.day.val > 0x31) { return undefined; }
+        result = dcf_now.day.digit.hi & 0x1; break;
       case 41:
-        if (now.day.val > 0x31) { return undefined; }
-        result = now.day.digit.hi & 0x2; break;
+        if (dcf_now.day.val > 0x31) { return undefined; }
+        result = dcf_now.day.digit.hi & 0x2; break;
   
       case 42:
-        if (now.weekday.val > 0x7) { return undefined; }
-        result = now.weekday.val & 0x1; break;
+        if (dcf_now.weekday.val > 0x7) { return undefined; }
+        result = dcf_now.weekday.val & 0x1; break;
       case 43:
-        if (now.weekday.val > 0x7) { return undefined; }
-        result = now.weekday.val & 0x2; break;
+        if (dcf_now.weekday.val > 0x7) { return undefined; }
+        result = dcf_now.weekday.val & 0x2; break;
       case 44:
-        if (now.weekday.val > 0x7) { return undefined; }
-        result = now.weekday.val & 0x4; break;
+        if (dcf_now.weekday.val > 0x7) { return undefined; }
+        result = dcf_now.weekday.val & 0x4; break;
   
       case 45:
-        if (now.month.val > 0x12) { return undefined; }
-        result = now.month.digit.lo & 0x1; break;
+        if (dcf_now.month.val > 0x12) { return undefined; }
+        result = dcf_now.month.digit.lo & 0x1; break;
       case 46:
-        if (now.month.val > 0x12) { return undefined; }
-        result = now.month.digit.lo & 0x2; break;
+        if (dcf_now.month.val > 0x12) { return undefined; }
+        result = dcf_now.month.digit.lo & 0x2; break;
       case 47:
-        if (now.month.val > 0x12) { return undefined; }
-        result = now.month.digit.lo & 0x4; break;
+        if (dcf_now.month.val > 0x12) { return undefined; }
+        result = dcf_now.month.digit.lo & 0x4; break;
       case 48:
-        if (now.month.val > 0x12) { return undefined; }
-        result = now.month.digit.lo & 0x8; break;
+        if (dcf_now.month.val > 0x12) { return undefined; }
+        result = dcf_now.month.digit.lo & 0x8; break;
   
       case 49:
-        if (now.month.val > 0x12) { return undefined; }
-        result = now.month.digit.hi & 0x1; break;
+        if (dcf_now.month.val > 0x12) { return undefined; }
+        result = dcf_now.month.digit.hi & 0x1; break;
   
       case 50:
-        if (now.year.val > 0x99) { return undefined; }
-        result = now.year.digit.lo & 0x1; break;
+        if (dcf_now.year.val > 0x99) { return undefined; }
+        result = dcf_now.year.digit.lo & 0x1; break;
       case 51:
-        if (now.year.val > 0x99) { return undefined; }
-        result = now.year.digit.lo & 0x2; break;
+        if (dcf_now.year.val > 0x99) { return undefined; }
+        result = dcf_now.year.digit.lo & 0x2; break;
       case 52:
-        if (now.year.val > 0x99) { return undefined; }
-        result = now.year.digit.lo & 0x4; break;
+        if (dcf_now.year.val > 0x99) { return undefined; }
+        result = dcf_now.year.digit.lo & 0x4; break;
       case 53:
-        if (now.year.val > 0x99) { return undefined; }
-        result = now.year.digit.lo & 0x8; break;
+        if (dcf_now.year.val > 0x99) { return undefined; }
+        result = dcf_now.year.digit.lo & 0x8; break;
   
       case 54:
-        if (now.year.val > 0x99) { return undefined; }
-        result = now.year.digit.hi & 0x1; break;
+        if (dcf_now.year.val > 0x99) { return undefined; }
+        result = dcf_now.year.digit.hi & 0x1; break;
       case 55:
-        if (now.year.val > 0x99) { return undefined; }
-        result = now.year.digit.hi & 0x2; break;
+        if (dcf_now.year.val > 0x99) { return undefined; }
+        result = dcf_now.year.digit.hi & 0x2; break;
       case 56:
-        if (now.year.val > 0x99) { return undefined; }
-        result = now.year.digit.hi & 0x4; break;
+        if (dcf_now.year.val > 0x99) { return undefined; }
+        result = dcf_now.year.digit.hi & 0x4; break;
       case 57:
-        if (now.year.val > 0x99) { return undefined; }
-        result = now.year.digit.hi & 0x8; break;
+        if (dcf_now.year.val > 0x99) { return undefined; }
+        result = dcf_now.year.digit.hi & 0x8; break;
   
       case 58:
-        if (now.weekday.val > 0x07 ||
-            now.day.val     > 0x31 ||
-            now.month.val   > 0x12 ||
-            now.year.val    > 0x99) { return undefined; }
+        if (dcf_now.weekday.val > 0x07 ||
+            dcf_now.day.val     > 0x31 ||
+            dcf_now.month.val   > 0x12 ||
+            dcf_now.year.val    > 0x99) { return undefined; }
   
-        result = parity(now.day.digit.lo)   ^
-                 parity(now.day.digit.hi)   ^
-                 parity(now.month.digit.lo) ^
-                 parity(now.month.digit.hi) ^
-                 parity(now.weekday.val)    ^
-                 parity(now.year.digit.lo)  ^
-                 parity(now.year.digit.hi); break;
+        result = parity(dcf_now.day.digit.lo)   ^
+                 parity(dcf_now.day.digit.hi)   ^
+                 parity(dcf_now.month.digit.lo) ^
+                 parity(dcf_now.month.digit.hi) ^
+                 parity(dcf_now.weekday.val)    ^
+                 parity(dcf_now.year.digit.lo)  ^
+                 parity(dcf_now.year.digit.hi); break;
   
       case 59:
         // special handling for leap seconds
-        if (now.leap_second_scheduled && now.minute.val == 0) { result = 0; break; }
+        if (dcf_now.leap_second_scheduled && dcf_now.minute.val == 0) { result = 0; break; }
       // standard case: fall through to "sync_mark"
       case 60:
         return sync_mark;
@@ -889,7 +894,7 @@ namespace DCF77_Encoder {
 
 static uint8_t times_100ms = 0;
 uint8_t stop_modulation_after_times_100ms = 5;
-DCF77::time_data_t now;
+DCF77::time_data_t dcf_now;
 
 void modulate() {
   if (times_100ms == 0) {
@@ -909,10 +914,10 @@ void modulate() {
     // after 900ms
     times_100ms = 0;
 
-    DCF77_Encoder::advance_second(now);
-    DCF77::time_data_t l_now = now;
-    DCF77_Encoder::advance_minute(l_now);
-    const DCF77::tick_t output_tick = DCF77_Encoder::get_current_signal(l_now);
+    DCF77_Encoder::advance_second(dcf_now);
+    DCF77::time_data_t l_dcf_now = dcf_now;
+    DCF77_Encoder::advance_minute(l_dcf_now);
+    const DCF77::tick_t output_tick = DCF77_Encoder::get_current_signal(l_dcf_now);
     stop_modulation_after_times_100ms = output_tick == DCF77::long_tick  ? 2:
                                         output_tick == DCF77::short_tick ? 1:
                                         output_tick == DCF77::undefined  ? 1:
@@ -982,25 +987,26 @@ void initTime() {
 }
 
 void resetNow() {
-  now.year.val = 0x01;
-  now.month.val = 0x01;
-  now.day.val = 0x01;
-  now.weekday.val = 1;
-  now.hour.val = 0x00;
-  now.minute.val = 0x00;
-  now.second = 0;
-  now.uses_summertime = 0;
-  now.uses_backup_antenna = 0;
-  now.timezone_change_scheduled = 0;
-  now.leap_second_scheduled = 0;
+  dcf_now.year.val = 0x01;
+  dcf_now.month.val = 0x01;
+  dcf_now.day.val = 0x01;
+  dcf_now.weekday.val = 1;
+  dcf_now.hour.val = 0x00;
+  dcf_now.minute.val = 0x00;
+  dcf_now.second = 0;
+  dcf_now.uses_summertime = 0;
+  dcf_now.uses_backup_antenna = 0;
+  dcf_now.timezone_change_scheduled = 0;
+  dcf_now.leap_second_scheduled = 0;
 }
 
 void checkSetNow() {
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    int cursec = timeinfo.tm_sec;
+  struct tm utctimeinfo, localtimeinfo;
+  if (getLocalTime(&utctimeinfo)) {
+    int cursec = utctimeinfo.tm_sec;
     if (cursec != oldsec) {
-      setNowToTime(&timeinfo);
+      localtimeinfo = convertUTCtoLocal(utctimeinfo);
+      setDCFnowToTime(&localtimeinfo);
       flags.setnow = false;
       times_100ms = 0;
     }
@@ -1008,55 +1014,86 @@ void checkSetNow() {
   }
 }
 
-void setNowToTime(struct tm * t) {
+void setDCFnowToTime(struct tm* t) {
   size_t written = strftime(formatString, 32, "%d.%m.%Y %H:%M:%S", t);
-  now.day.digit.hi = (uint8_t) formatString[0];
-  now.day.digit.lo = (uint8_t) formatString[1];
-  now.month.digit.hi = (uint8_t) formatString[3];
-  now.month.digit.lo = (uint8_t) formatString[4];
-  now.year.digit.hi = (uint8_t) formatString[8];
-  now.year.digit.lo = (uint8_t) formatString[9];
-  now.hour.digit.hi = (uint8_t) formatString[11];
-  now.hour.digit.lo = (uint8_t) formatString[12];
-  now.minute.digit.hi = (uint8_t) formatString[14];
-  now.minute.digit.lo = (uint8_t) formatString[15];
-  now.second = t->tm_sec;
-  now.uses_summertime = t->tm_isdst;
+  dcf_now.day.digit.hi = (uint8_t) formatString[0];
+  dcf_now.day.digit.lo = (uint8_t) formatString[1];
+  dcf_now.month.digit.hi = (uint8_t) formatString[3];
+  dcf_now.month.digit.lo = (uint8_t) formatString[4];
+  dcf_now.year.digit.hi = (uint8_t) formatString[8];
+  dcf_now.year.digit.lo = (uint8_t) formatString[9];
+  dcf_now.hour.digit.hi = (uint8_t) formatString[11];
+  dcf_now.hour.digit.lo = (uint8_t) formatString[12];
+  dcf_now.minute.digit.hi = (uint8_t) formatString[14];
+  dcf_now.minute.digit.lo = (uint8_t) formatString[15];
+  dcf_now.second = t->tm_sec;
+  dcf_now.uses_summertime = t->tm_isdst;
 }
 
 void syncNTP() {
-  struct tm timeinfo;
+  struct tm utctimeinfo;
   consolePrint(F("Synchronizing with "));
   consolePrintLn(NTP_SERVER);
+  // reconfiguring triggers a fresh NTP sync
   configTime(NTP_GMT_S, NTP_DAYLIGHT_S, NTP_SERVER);
-  if (getLocalTime(&timeinfo)) {
+  if (getLocalTime(&utctimeinfo)) {
     flags.synced = true;
     flags.setnow = true;
-    consolePrint("Time synchronized to ");
-    consolePrintTime(&timeinfo);
+    oldsec = utctimeinfo.tm_sec;
+    consolePrint("UTC synchronized to ");
+    consolePrintTime(&utctimeinfo);
+    consolePrintLn("");
   } else {
     consolePrintLn("Failed to synchronize time!");
   }
 }
 
+struct tm convertUTCtoLocal(struct tm utctimeinfo) {
+  struct tm localtimeinfo;
+  time_t utc_now, local_now;
+  TimeChangeRule *tcr;
+  utc_now = mktime(&utctimeinfo);
+  local_now = CE.toLocal(utc_now, &tcr);
+  localtimeinfo = *localtime(&local_now);
+  return localtimeinfo;
+}
+
+TimeChangeRule* getTimeZone(struct tm utctimeinfo) {
+  time_t utc_now;
+  TimeChangeRule *tcr;
+  utc_now = mktime(&utctimeinfo);
+  CE.toLocal(utc_now, &tcr);
+  return tcr;
+}
+
 void getStatus() {
-  struct tm timeinfo;
-  boolean getNTPTime;
+  struct tm utctimeinfo, localtimeinfo;
+  boolean resUTCTime;
+  TimeChangeRule *tcr;
   // get current times before printing to avoid differences due to printing
-  getNTPTime = getLocalTime(&timeinfo);
-  DCF77::time_data_t p_now = now;
-  if (getNTPTime) {
-    consolePrint(F("NTP time: "));
-    consolePrintTime(&timeinfo);
-    consolePrintLn(F("      dd.mm.YYYY HH:MM:SS"));
+  resUTCTime = getLocalTime(&utctimeinfo);
+  DCF77::time_data_t p_dcf_now = dcf_now;
+  if (resUTCTime) {
+    localtimeinfo = convertUTCtoLocal(utctimeinfo);
+    tcr = getTimeZone(utctimeinfo);
+    consolePrintLn(F("UTC time:"));
+    consolePrint("    ");
+    consolePrintTime(&utctimeinfo);
+    consolePrintLn(F("    dd.mm.YYYY HH:MM:SS"));
+    consolePrint(F("Local time: "));
+    consolePrintLn(tcr->abbrev);
+    consolePrint("    ");
+    consolePrintTime(&localtimeinfo);
+    consolePrintLn(F("    dd.mm.YYYY HH:MM:SS"));
   } else {
-    consolePrintLn("Failed to get NTP time!");
+    consolePrintLn("Failed to get current time from NTP service!");
   }
-  consolePrint(F("DCF time: "));
-  consolePrintDCF(p_now);
-  consolePrintLn(F("      DD.MM.YY hh:mm:ss w sbtl"));
-  consolePrintLn(F("      w = weekday, s = summertime, b = backup antenna"));
-  consolePrintLn(F("      t = timezone change scheduled, l = leap second scheduled"));
+  consolePrintLn(F("DCF time:"));
+  consolePrint("    ");
+  consolePrintDCF(p_dcf_now);
+  consolePrintLn(F("    DD.MM.YY hh:mm:ss w sbtl"));
+  consolePrintLn(F("    w = weekday, s = summertime, b = backup antenna"));
+  consolePrintLn(F("    t = timezone change scheduled, l = leap second scheduled"));
 }
 
 void consolePrintNTP() {
@@ -1100,32 +1137,32 @@ template <class T> void consolePrintLn(T output, int type) {
   consolePrint("\n");
 }
 
-void consolePrintTime(struct tm * t) {
+void consolePrintTime(struct tm* t) {
   size_t written = strftime(formatString, 32, "%d.%m.%Y %H:%M:%S", t);
   consolePrintLn(formatString);
 }
 
-void consolePrintDCF(const DCF77::time_data_t &now) {
-  const DCF77::time_data_t l_now = now;
-  Debug::bcddigits(l_now.day.val);
+void consolePrintDCF(const DCF77::time_data_t &dcf_now) {
+  const DCF77::time_data_t l_dcf_now = dcf_now;
+  Debug::bcddigits(l_dcf_now.day.val);
   consolePrint('.');
-  Debug::bcddigits(l_now.month.val);
+  Debug::bcddigits(l_dcf_now.month.val);
   consolePrint('.');
-  Debug::bcddigits(l_now.year.val);
+  Debug::bcddigits(l_dcf_now.year.val);
   consolePrint(' ');
-  Debug::bcddigits(l_now.hour.val);
+  Debug::bcddigits(l_dcf_now.hour.val);
   consolePrint(':');
-  Debug::bcddigits(l_now.minute.val);
+  Debug::bcddigits(l_dcf_now.minute.val);
   consolePrint(':');
-  consolePrint(l_now.second / 10);
-  consolePrint(l_now.second % 10);
+  consolePrint(l_dcf_now.second / 10);
+  consolePrint(l_dcf_now.second % 10);
   consolePrint(' ');
-  consolePrint(l_now.weekday.val);
+  consolePrint(l_dcf_now.weekday.val);
   consolePrint(' ');
-  consolePrint(l_now.uses_summertime);
-  consolePrint(l_now.uses_backup_antenna);
-  consolePrint(l_now.timezone_change_scheduled);
-  consolePrintLn(l_now.leap_second_scheduled);
+  consolePrint(l_dcf_now.uses_summertime);
+  consolePrint(l_dcf_now.uses_backup_antenna);
+  consolePrint(l_dcf_now.timezone_change_scheduled);
+  consolePrintLn(l_dcf_now.leap_second_scheduled);
 }
 
 void procCommands() {
